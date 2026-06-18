@@ -46,15 +46,17 @@ Built with **Node.js + Express**, **PostgreSQL**, **Prisma ORM**, and **Socket.i
 
 ---
 
-## API Reference
 
-All routes are prefixed with `/api/v1`.
 
 ### Health
 
 | Method | Endpoint  | Description        |
 |--------|-----------|--------------------|
 | GET    | `/health` | Liveness check     |
+
+## API Reference
+
+All routes are prefixed with `/api/v1`.
 
 ### Users
 
