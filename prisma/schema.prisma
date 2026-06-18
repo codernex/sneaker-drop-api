@@ -1,0 +1,91 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String        @id @default(cuid())
+  username     String        @unique
+  email        String        @unique
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+  reservations Reservation[]
+  purchases    Purchase[]
+
+  @@map("users")
+}
+
+model Drop {
+  id             String        @id @default(cuid())
+  name           String
+  description    String?
+  imageUrl       String?       @map("image_url")
+  totalStock     Int           @map("total_stock")
+  availableStock Int           @map("available_stock")
+  price          Decimal       @db.Decimal(10, 2)
+  startsAt       DateTime      @map("starts_at")
+  endsAt         DateTime?     @map("ends_at")
+  isActive       Boolean       @default(true) @map("is_active")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  reservations   Reservation[]
+  purchases      Purchase[]
+
+  @@map("drops")
+}
+
+model Reservation {
+  id        String            @id @default(cuid())
+  userId    String            @map("user_id")
+  dropId    String            @map("drop_id")
+  status    ReservationStatus @default(PENDING)
+  expiresAt DateTime          @map("expires_at")
+  createdAt DateTime          @default(now()) @map("created_at")
+  updatedAt DateTime          @updatedAt @map("updated_at")
+  user      User              @relation(fields: [userId], references: [id])
+  drop      Drop              @relation(fields: [dropId], references: [id])
+  purchase  Purchase?
+
+  // Index for looking up a user's reservations for a specific drop.
+  // Uniqueness of PENDING reservations is enforced at the application layer
+  // (findFirst check + pg_try_advisory_xact_lock in reserveItem).
+  // A DB-level unique on status would block a user from ever having a second
+  // EXPIRED/CANCELLED row for the same drop after re-reserving.
+  @@index([userId, dropId])
+  @@index([dropId])
+  @@index([expiresAt, status])
+  @@map("reservations")
+}
+
+model Purchase {
+  id            String      @id @default(cuid())
+  userId        String      @map("user_id")
+  dropId        String      @map("drop_id")
+  reservationId String      @unique @map("reservation_id")
+  quantity      Int         @default(1)
+  unitPrice     Decimal     @map("unit_price") @db.Decimal(10, 2)
+  totalAmount   Decimal     @map("total_amount") @db.Decimal(10, 2)
+  createdAt     DateTime    @default(now()) @map("created_at")
+  user          User        @relation(fields: [userId], references: [id])
+  drop          Drop        @relation(fields: [dropId], references: [id])
+  reservation   Reservation @relation(fields: [reservationId], references: [id])
+
+  @@index([dropId])
+  @@index([userId])
+  @@map("purchases")
+}
+
+enum ReservationStatus {
+  PENDING
+  COMPLETED
+  EXPIRED
+  CANCELLED
+}
