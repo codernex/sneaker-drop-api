@@ -2,8 +2,6 @@ import { NextFunction, Request, Response } from "express";
 import { AppError } from "../errors/AppError";
 import env from "@/config/env";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
 interface ErrorResponse {
   success: false;
   statusCode: number;
