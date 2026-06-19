@@ -22,7 +22,7 @@ const registerSchema = z.object({
 export const register = requestHandler(
   async (req, res) => {
     const user = await createUser(req.body.username, req.body.email);
-    return { res, message: "User registered", data: user };
+    return { res, message: "User registered", data: user, statusCode: 201 };
   },
   { body: registerSchema },
 );
