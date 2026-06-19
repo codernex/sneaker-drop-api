@@ -14,16 +14,17 @@ import {
  * Atomically reserve one unit of a drop for a user.
  *
  * Race-condition strategy:
- *  1. pg_try_advisory_xact_lock(hashtext(dropId))
- *     → Transaction-scoped advisory lock, unique per drop.
- *     → At most one concurrent transaction can hold this per dropId.
- *     → pg_try_* variant is non-blocking: returns false instead of waiting.
+ *  SELECT … FOR UPDATE on the drops row
+ *  → Row-level write lock within the transaction.
+ *  → Serializes concurrent writes to the same row at the DB level.
+ *  → Guarantees we read committed (non-phantom) stock before decrementing.
+ *  → If stock hits 0, the check below rejects subsequent transactions.
  *
- *  2. SELECT … FOR UPDATE on the drops row
- *     → Row-level write lock within the transaction.
- *     → Guarantees we read committed (non-phantom) stock before decrementing.
- *
- *  Both locks release automatically when the transaction commits/rolls back.
+ *  NOTE: pg_try_advisory_xact_lock was intentionally removed.
+ *  It blocked ALL concurrent transactions (even when stock > 0),
+ *  causing false "High demand" errors. FOR UPDATE alone is sufficient
+ *  to prevent overselling — the DB queues concurrent writers and each
+ *  one sees the correctly decremented stock of the previous transaction.
  */
 export const reserveItem = async (userId: string, dropId: string) => {
   const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -42,19 +43,8 @@ export const reserveItem = async (userId: string, dropId: string) => {
   const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
 
   const result = await prisma.$transaction(async (tx) => {
-    // 1. Advisory lock — non-blocking, transaction-scoped
-    const [lockRow] = await tx.$queryRawUnsafe<{ acquired: boolean }[]>(
-      `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired`,
-      dropId,
-    );
-
-    if (!lockRow?.acquired)
-      throw new ConflictError(
-        "High demand! Another reservation is in progress. Please try again.",
-        "LOCK_FAILED",
-      );
-
-    // 2. Row-level lock on the drop
+    // 1. Row-level lock on the drop — blocks concurrent writers until this
+    //    transaction commits, then releases. Prevents phantom reads on stock.
     const [drop] = await tx.$queryRawUnsafe<
       { id: string; available_stock: number; is_active: boolean }[]
     >(
@@ -74,13 +64,13 @@ export const reserveItem = async (userId: string, dropId: string) => {
         "OUT_OF_STOCK",
       );
 
-    // 3. Atomic stock decrement
+    // 2. Atomic stock decrement
     await tx.$executeRawUnsafe(
       `UPDATE drops SET available_stock = available_stock - 1, updated_at = NOW() WHERE id = $1`,
       dropId,
     );
 
-    // 4. Persist reservation
+    // 3. Persist reservation
     const reservation = await tx.reservation.create({
       data: { userId, dropId, status: "PENDING", expiresAt },
     });

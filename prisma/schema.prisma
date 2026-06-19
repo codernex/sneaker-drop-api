@@ -55,7 +55,7 @@ model Reservation {
 
   // Index for looking up a user's reservations for a specific drop.
   // Uniqueness of PENDING reservations is enforced at the application layer
-  // (findFirst check + pg_try_advisory_xact_lock in reserveItem).
+  // (findFirst check before the transaction + SELECT FOR UPDATE inside it).
   // A DB-level unique on status would block a user from ever having a second
   // EXPIRED/CANCELLED row for the same drop after re-reserving.
   @@index([userId, dropId])

@@ -42,7 +42,7 @@ Built with **Node.js + Express**, **PostgreSQL**, **Prisma ORM**, and **Socket.i
 | `purchases(reservation_id)`        | Unique  | Ensures exactly one purchase record per reservation               |
 
 > **Why no unique constraint on `(user_id, drop_id, status)`?**
-> An earlier version had `@@unique([userId, dropId, status])`, intended to prevent duplicate *active* reservations. However it incorrectly applied to **all** statuses: once a user's reservation expired (creating an `EXPIRED` row), re-reserving the same drop would eventually try to create a second `EXPIRED` row and hit a unique-constraint violation. Duplicate `PENDING` reservations are prevented at the application layer instead — a `findFirst` check combined with a `pg_try_advisory_xact_lock` inside the reservation transaction.
+> An earlier version had `@@unique([userId, dropId, status])`, intended to prevent duplicate *active* reservations. However it incorrectly applied to **all** statuses: once a user's reservation expired (creating an `EXPIRED` row), re-reserving the same drop would eventually try to create a second `EXPIRED` row and hit a unique-constraint violation. Duplicate `PENDING` reservations are prevented at the application layer instead — a `findFirst` check before entering the transaction.
 
 ---
 
@@ -170,38 +170,61 @@ The `intervalHandle.unref()` call ensures the interval does not prevent Node.js 
 
 **Problem:** 100 users clicking "Reserve" at the same millisecond for the last 1 item — only 1 should succeed.
 
-**Solution: Dual-layer locking inside a Prisma `$transaction`**
+**Solution: `SELECT ... FOR UPDATE` row-level lock inside a Prisma `$transaction`**
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  BEGIN TRANSACTION                                          │
 │                                                             │
-│  1. pg_try_advisory_xact_lock(hashtext(dropId))            │
-│     → Transaction-scoped advisory lock, unique per drop     │
-│     → Non-blocking (pg_try_*): returns false if busy        │
-│     → Competing request gets 409 CONFLICT immediately       │
-│                                                             │
-│  2. SELECT … FROM drops WHERE id = $1 FOR UPDATE           │
+│  1. SELECT … FROM drops WHERE id = $1 FOR UPDATE           │
 │     → Row-level write lock on the specific drop row         │
-│     → Prevents phantom reads — stock value is committed     │
+│     → Concurrent transactions are QUEUED by PostgreSQL,     │
+│       not rejected — each reads committed stock in turn     │
 │                                                             │
-│  3. Check available_stock >= 1                              │
+│  2. Check available_stock >= 1                              │
+│     → If stock is 0, throw 409 OUT_OF_STOCK                 │
 │                                                             │
-│  4. UPDATE drops SET available_stock = available_stock - 1  │
+│  3. UPDATE drops SET available_stock = available_stock - 1  │
 │     (atomic decrement, no race between read and write)      │
 │                                                             │
-│  5. INSERT INTO reservations …                              │
+│  4. INSERT INTO reservations …                              │
 │                                                             │
-│  COMMIT — both locks released                               │
+│  COMMIT — row lock released, next queued transaction runs   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Why two locks?**
+**How this prevents overselling with concurrent requests:**
 
-- The **advisory lock** prevents multiple transactions from even reaching the stock check concurrently for the same drop, giving a fast-fail to competing requests.
-- The **`FOR UPDATE` row lock** is a defense-in-depth guarantee: even if two transactions somehow passed the advisory lock, only one can hold the row lock and perform the decrement — the other will wait and then read the updated (0) stock.
+```
+        User A                          User B
+           │                               │
+    BEGIN TRANSACTION               BEGIN TRANSACTION
+           │                               │
+    SELECT ... FOR UPDATE  ◄──── both arrive at the same row
+           │                               │
+    ✅ A acquires row lock          ⏳ B is QUEUED by PostgreSQL
+           │
+    reads: available_stock = 1
+    stock >= 1 ✅
+    UPDATE stock → 0
+    INSERT reservation
+    COMMIT ──────────────────────────► B now acquires lock
+                                           │
+                                    reads: available_stock = 0
+                                    stock < 1 ❌ → 409 OUT_OF_STOCK
+                                    ROLLBACK
+```
 
-This guarantees that **exactly one** user can reserve the last item, regardless of concurrent load. All other simultaneous requests receive a `409 Conflict` with a user-friendly "High demand!" message.
+**Why `pg_try_advisory_xact_lock` was removed:**
+
+An earlier version used a `pg_try_advisory_xact_lock` on top of `FOR UPDATE`. While well-intentioned, it was actively harmful:
+
+| Scenario | Advisory Lock + FOR UPDATE | FOR UPDATE alone |
+|---|---|---|
+| 100 users, **1** item | 1 succeeds, 99 get `LOCK_FAILED` | 1 succeeds, 99 get `OUT_OF_STOCK` ✅ |
+| 100 users, **10** items | 1 succeeds, **99 get `LOCK_FAILED`** ❌ | 10 succeed, 90 get `OUT_OF_STOCK` ✅ |
+
+`pg_try_advisory_xact_lock` is non-blocking — it immediately returns `false` for any transaction that arrives while another is in-flight, regardless of available stock. This caused false "High demand!" errors even when dozens of items were available. `FOR UPDATE` alone is the correct and complete solution: PostgreSQL queues concurrent writers at the row level, and each one reads the post-commit stock of the previous transaction.
 
 ---
 
