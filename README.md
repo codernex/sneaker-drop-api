@@ -22,9 +22,9 @@ Built with **Node.js + Express**, **PostgreSQL**, **Prisma ORM**, and **Socket.i
 | Layer        | Technology                    |
 |--------------|-------------------------------|
 | Runtime      | Node.js (CommonJS)            |
-| Framework    | Express 4                     |
+| Framework    | Express 5                     |
 | Database     | PostgreSQL                    |
-| ORM          | Prisma 5                      |
+| ORM          | Prisma 7                      |
 | Real-time    | Socket.io 4                   |
 | Validation   | Zod                           |
 | Language     | TypeScript 5                  |
